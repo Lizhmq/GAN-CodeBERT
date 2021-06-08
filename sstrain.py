@@ -12,7 +12,7 @@ from tqdm import tqdm
 from sklearn.metrics import classification_report, accuracy_score
 from torch.utils.tensorboard import SummaryWriter
 from dataset import ClassifierDataset
-from model import BaseModel, build_model
+from model import BaseModel, build_model, Generator, Discriminator
 
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -29,7 +29,7 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
+def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, pool):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         args.tensorboard_dir = os.path.join(args.output_dir, 'tensorboard')
@@ -60,21 +60,28 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
          'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(
-            nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            nd in n for nd in no_decay)], 'weight_decay': 0.0},
+        {'params': dis.parameters()}
     ]
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate, eps=args.adam_epsilon)
+    gen_optimizer = AdamW(gen.parameters(), lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps,
+                                                num_training_steps=t_total)
+    gen_scheduler = get_linear_schedule_with_warmup(gen_optimizer, num_warmup_steps=args.warmup_steps,
                                                 num_training_steps=t_total)
     checkpoint_last = os.path.join(args.output_dir, 'checkpoint-last')
     # scheduler_last = os.path.join(checkpoint_last, 'scheduler.pt')
     optimizer_last = os.path.join(checkpoint_last, 'optimizer.pt')
+    gen_optimizer_last = os.path.join(checkpoint_last, 'gen_optimizer.pt')
     # if os.path.exists(scheduler_last):
     #     scheduler.load_state_dict(torch.load(scheduler_last, map_location="cpu"))
     if os.path.exists(optimizer_last):
         logger.warning(f"Loading optimizer from {optimizer_last}")
         optimizer.load_state_dict(torch.load(
             optimizer_last, map_location="cpu"))
+        gen_optimizer.load_state_dict(torch.load(
+            gen_optimizer_last, map_location="cpu"))
     if args.local_rank == 0:
         torch.distributed.barrier()
 
@@ -106,6 +113,10 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
 
+    epsilon = 1e-8
+
+    celoss = torch.nn.CrossEntropyLoss(ignore_index=2)
+
     for idx in range(args.start_epoch, int(args.num_train_epochs)):
         for step, batch in enumerate(train_dataloader):
             x, y = batch
@@ -114,8 +125,40 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
             x_mask = x.ne(tokenizer.pad_token_id).to(x)
             
             model.train()
-            outputs = model(x, y, x_mask)
-            loss = outputs
+            gen.train()
+            dis.train()
+            
+            true_rep = model.rep(x, x_mask)
+            batch_size = true_rep.shape[0]
+            noise = torch.zeros(batch_size, 128, device=args.device).uniform_(0, 1)
+            
+            fake_rep = gen(noise)
+
+            disciminator_input = torch.cat([true_rep, fake_rep], dim=0)
+            features, logits, probs = dis(disciminator_input)
+            
+            features_list = torch.split(features, batch_size)
+            D_real_features = features_list[0]
+            D_fake_features = features_list[1]
+        
+            logits_list = torch.split(logits, batch_size)
+            D_real_logits = logits_list[0]
+            D_fake_logits = logits_list[1]
+            
+            probs_list = torch.split(probs, batch_size)
+            D_real_probs = probs_list[0]
+            D_fake_probs = probs_list[1]
+
+            g_loss_d = -1 * torch.mean(torch.log(1 - D_fake_probs[:, -1] + epsilon))
+            g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features, dim=0) - torch.mean(D_fake_features, dim=0), 2))
+            gen_loss = g_loss_d + g_feat_reg
+
+            D_L_Supervised = celoss(D_real_logits, y)
+
+            D_L_unsupervised1U = -1 * torch.mean(torch.log(1 - D_real_probs[:, -1] + epsilon))
+            D_L_unsupervised2U = -1 * torch.mean(torch.log(D_fake_probs[:, -1] + epsilon))
+            loss = D_L_Supervised + D_L_unsupervised1U + D_L_unsupervised2U
+
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
@@ -123,14 +166,18 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
                 loss = loss / args.gradient_accumulation_steps
 
             loss.backward()
+            gen_loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
+            tr_loss += gen_loss.item()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
                 optimizer.zero_grad()
+                gen_optimizer.step()
+                gen_optimizer.zero_grad()
                 scheduler.step()
                 global_step += 1
                 avg_loss = round(
@@ -187,6 +234,8 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
 
                     torch.save(optimizer.state_dict(), os.path.join(
                         last_output_dir, "optimizer.pt"))
+                    torch.save(gen_optimizer.state_dict(), os.path.join(
+                        last_output_dir, "gen_optimizer.pt"))
                     # torch.save(scheduler.state_dict(), os.path.join(last_output_dir, "scheduler.pt"))
                     logger.info(
                         "Saving optimizer and scheduler states to %s", last_output_dir)
@@ -391,6 +440,8 @@ def main():
 
 
     model = build_model(args)
+    gen = Generator(128, 768, 768)
+    dis = Discriminator(768, 512, 2)
     args.vocab_size = len(tokenizer)
     model_parameters = model.parameters()
     num_params = sum([np.prod(p.size()) for p in model_parameters])
@@ -403,7 +454,7 @@ def main():
 
     # Training
     if args.do_train:
-        global_step, tr_loss = train(args, train_dataset, test_dataset, model, tokenizer, fh, pool)
+        global_step, tr_loss = train(args, train_dataset, test_dataset, model, gen, dis, tokenizer, fh, pool)
         logger.info(" global_step = %s, average loss = %s",
                     global_step, tr_loss)
 
