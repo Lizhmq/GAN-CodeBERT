@@ -2,7 +2,7 @@ import logging
 import os
 
 import torch
-from torch import nn
+import torch.nn as nn
 from transformers import RobertaModel
 
 
@@ -53,6 +53,11 @@ class BaseModel(nn.Module):
             return loss0
         else:
             return logits0
+    
+    def rep(self, input_ids, input_mask=None):
+        sequence_output = self.bert(input_ids, input_mask)[0]
+        output0 = sequence_output[:, 0, :]
+        return output0
 
 
 def build_model(args, load_path=None):
@@ -60,4 +65,41 @@ def build_model(args, load_path=None):
     if load_path is not None:
         model = model.from_pretrained(load_path).to(args.device)
     return model
+
+
+class Generator(nn.Module):
     
+    def __init__(self, noise_dim, hidden_size, output_size, dropout=0.1):
+        super(Generator, self).__init__()
+        self.layer1 = nn.Linear(noise_dim, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, output_size)
+        self.act = nn.LeakyReLU(0.2)
+        self.dp = nn.Dropout(dropout)
+    
+    def forward(self, input):
+        h1 = self.layer1(input)
+        h1 = self.dp(self.act(h1))
+        out = self.layer2(h1)
+        out = self.dp(self.act(out))
+        return out
+
+
+class Discriminator(nn.Module):
+
+    def __init__(self, input_dim, hidden_dim, num_labels, dropout=0.1):
+        super().__init__()
+        self.layer1 = nn.Linear(input_dim, hidden_dim)
+        self.classify = nn.Linear(hidden_dim, num_labels + 1)       # y + 1 for class FAKE
+        self.act = nn.LeakyReLU(0.2)
+        self.dp = nn.Dropout(dropout)
+        self.softmax = nn.Softmax(dim=1)
+    
+    def forward(self, input):
+        input = self.dp(input)
+        h1 = self.layer1(input)
+        h1 = self.dp(self.act(h1))
+        out = self.classify(h1)
+        out = self.dp(self.act(out))
+        logits = self.classify(out)
+        probs = self.softmax(logits)
+        return h1, logits, probs
