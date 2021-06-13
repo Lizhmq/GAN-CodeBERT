@@ -42,7 +42,7 @@ class BaseModel(nn.Module):
         self.classifier.load_state_dict(torch.load(os.path.join(path, "cls.bin"), map_location=self.device))
         return self
 
-    def forward(self, input_ids, y=None, input_mask=None):
+    def forward(self, input_ids, input_mask, y=None):
         sequence_output = self.bert(input_ids, input_mask)[0]
         output0 = self.dropout(sequence_output[:, 0, :])
         batch_size, max_len, feat_dim = sequence_output.shape
@@ -54,7 +54,7 @@ class BaseModel(nn.Module):
         else:
             return logits0
     
-    def rep(self, input_ids, input_mask=None):
+    def rep(self, input_ids, input_mask):
         sequence_output = self.bert(input_ids, input_mask)[0]
         output0 = sequence_output[:, 0, :]
         return output0
@@ -86,20 +86,15 @@ class Generator(nn.Module):
 
 class Discriminator(nn.Module):
 
-    def __init__(self, input_dim, hidden_dim, num_labels, dropout=0.1):
+    def __init__(self, input_dim, hidden_dim, num_labels, dropout=0.):
         super().__init__()
-        self.layer1 = nn.Linear(input_dim, hidden_dim)
+        # self.layer1 = nn.Linear(input_dim, hidden_dim)
         self.classify = nn.Linear(hidden_dim, num_labels + 1)       # y + 1 for class FAKE
-        self.act = nn.LeakyReLU(0.2)
-        self.dp = nn.Dropout(dropout)
+        # self.act = nn.LeakyReLU(0.2)
+        # self.dp = nn.Dropout(dropout)
         self.softmax = nn.Softmax(dim=1)
     
     def forward(self, input):
-        input = self.dp(input)
-        h1 = self.layer1(input)
-        h1 = self.dp(self.act(h1))
-        out = self.classify(h1)
-        out = self.dp(self.act(out))
-        logits = self.classify(out)
+        logits = self.classify(input)
         probs = self.softmax(logits)
-        return h1, logits, probs
+        return logits, probs

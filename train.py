@@ -104,7 +104,6 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
     tr_loss, logging_loss, avg_loss, tr_nb = 0.0, 0.0, 0.0, global_step
     # model.resize_token_embeddings(len(tokenizer))
     model.zero_grad()
-    set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
 
     for idx in range(args.start_epoch, int(args.num_train_epochs)):
         for step, batch in enumerate(train_dataloader):
@@ -114,7 +113,7 @@ def train(args, train_dataset, valid_dataset, model, tokenizer, fh, pool):
             x_mask = x.ne(tokenizer.pad_token_id).to(x)
             
             model.train()
-            outputs = model(x, y, x_mask)
+            outputs = model(x, x_mask, y)
             loss = outputs
 
             if args.n_gpu > 1:
@@ -240,7 +239,7 @@ def valid_acc(args, model, tokenizer, eval_dataset, prefix="", eval_when_trainin
         x_mask = x.ne(tokenizer.pad_token_id).to(x)
 
         with torch.no_grad():
-            output = model(x, None, x_mask)
+            output = model(x, x_mask)
             predicts.extend(torch.argmax(output, dim=1).cpu().numpy())
 
     print(classification_report(golds, predicts))
