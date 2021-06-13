@@ -242,7 +242,7 @@ def valid_acc(args, model, tokenizer, eval_dataset, prefix="", eval_when_trainin
             output = model(x, x_mask)
             predicts.extend(torch.argmax(output, dim=1).cpu().numpy())
 
-    print(classification_report(golds, predicts))
+    print(classification_report(golds, predicts, digits=4))
     acc = accuracy_score(golds, predicts)
     results = {"accuracy": acc}
     return results

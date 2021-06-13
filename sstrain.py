@@ -52,6 +52,8 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
         t_total = total_examples // batch_size * args.num_train_epochs
     args.max_steps = t_total
     model.to(args.device)
+    gen.to(args.device)
+    dis.to(args.device)
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()
     # Prepare optimizer and schedule (linear warmup and decay)
@@ -61,7 +63,10 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
          'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(
             nd in n for nd in no_decay)], 'weight_decay': 0.0},
-        {'params': dis.parameters()}
+        {'params': [p for n, p in dis.named_parameters() if not any(nd in n for nd in no_decay)],
+         'weight_decay': args.weight_decay},
+        {'params': [p for n, p in dis.named_parameters() if any(
+            nd in n for nd in no_decay)], 'weight_decay': 0.0},
     ]
     optimizer = AdamW(optimizer_grouped_parameters,
                       lr=args.learning_rate, eps=args.adam_epsilon)
@@ -108,14 +113,16 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = args.start_step
-    tr_loss, logging_loss, avg_loss, tr_nb = 0.0, 0.0, 0.0, global_step
+    tr_loss_gen, logging_loss_gen, tr_nb = 0.0, 0.0, global_step
+    tr_loss_dis, logging_loss_dis = 0.0, 0.0
+
     # model.resize_token_embeddings(len(tokenizer))
     model.zero_grad()
     set_seed(args)  # Added here for reproducibility (even between python 2 and 3)
 
     epsilon = 1e-8
 
-    celoss = torch.nn.CrossEntropyLoss(ignore_index=2)
+    celoss = torch.nn.CrossEntropyLoss(reduction="mean", ignore_index=2)
 
     for idx in range(args.start_epoch, int(args.num_train_epochs)):
         for step, batch in enumerate(train_dataloader):
@@ -135,11 +142,11 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
             fake_rep = gen(noise)
 
             disciminator_input = torch.cat([true_rep, fake_rep], dim=0)
-            features, logits, probs = dis(disciminator_input)
+            logits, probs = dis(disciminator_input)
             
-            features_list = torch.split(features, batch_size)
-            D_real_features = features_list[0]
-            D_fake_features = features_list[1]
+            # features_list = torch.split(features, batch_size)
+            # D_real_features = features_list[0]
+            # D_fake_features = features_list[1]
         
             logits_list = torch.split(logits, batch_size)
             D_real_logits = logits_list[0]
@@ -148,30 +155,66 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
             probs_list = torch.split(probs, batch_size)
             D_real_probs = probs_list[0]
             D_fake_probs = probs_list[1]
+            # print(y.cpu().numpy())
+            # print(D_real_probs)
 
             g_loss_d = -1 * torch.mean(torch.log(1 - D_fake_probs[:, -1] + epsilon))
-            g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features, dim=0) - torch.mean(D_fake_features, dim=0), 2))
-            gen_loss = g_loss_d + g_feat_reg
+            # g_feat_reg = torch.mean(torch.pow(torch.mean(D_real_features, dim=0) - torch.mean(D_fake_features, dim=0), 2))
+            gen_loss = g_loss_d
 
-            D_L_Supervised = celoss(D_real_logits, y)
+            tmplogits = torch.zeros_like(D_real_logits)
+            tmplogits[:,-1] = -np.inf
+            tmplogits[:,:-1] = D_real_logits[:,:-1]
+            D_L_Supervised = celoss(tmplogits, y)
+            # pred_y = torch.argmax(D_real_logits, dim=1)
+            # correct_cnt = torch.sum(pred_y == y)
+            # total_cnt = y.shape[0] - torch.sum(y == 2)
+            # if total_cnt == 0:
+            #     acc = "-"
+            # else:
+            #     acc = str(correct_cnt / total_cnt)
+            # print(acc)
+            # log_probs = torch.nn.functional.log_softmax(D_real_logits, dim=-1)
+            # label2one_hot = torch.nn.functional.one_hot(y, log_probs.shape[-1])
+            # per_example_loss = -torch.sum(label2one_hot * log_probs, dim=-1)
+            # b_label_mask = y.ne(2)
+            # per_example_loss = torch.masked_select(per_example_loss, b_label_mask)
+            # labeled_example_count = per_example_loss.type(torch.float32).numel()
+            # if labeled_example_count == 0:
+            #     D_L_Supervised = 0
+            # else:
+            #     D_L_Supervised = torch.div(torch.sum(per_example_loss), labeled_example_count)
 
             D_L_unsupervised1U = -1 * torch.mean(torch.log(1 - D_real_probs[:, -1] + epsilon))
             D_L_unsupervised2U = -1 * torch.mean(torch.log(D_fake_probs[:, -1] + epsilon))
-            loss = D_L_Supervised + D_L_unsupervised1U + D_L_unsupervised2U
-
+            lamd = 2.
+            loss = D_L_Supervised + lamd * (D_L_unsupervised1U + D_L_unsupervised2U)
+            # print(D_L_Supervised.item())
+            # print(D_L_unsupervised1U.item())
+            # print(D_L_unsupervised2U.item())
+            # print()
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                gen_loss = gen_loss.mean()
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
+                gen_loss = gen_loss / args.gradient_accumulation_steps
+            
+            # !!!!!!!!!!!!!!!
+            gen_loss = gen_loss / 10
 
+            gen_loss.backward(retain_graph=True)
             loss.backward()
-            gen_loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), args.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(
+            #     gen.parameters(), args.max_grad_norm)
+            # torch.nn.utils.clip_grad_norm_(
+            #     dis.parameters(), args.max_grad_norm)
 
-            tr_loss += loss.item()
-            tr_loss += gen_loss.item()
+            tr_loss_dis += loss.item()
+            tr_loss_gen += gen_loss.item()
 
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 optimizer.step()
@@ -179,27 +222,29 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
                 gen_optimizer.step()
                 gen_optimizer.zero_grad()
                 scheduler.step()
+                gen_scheduler.step()
                 global_step += 1
-                avg_loss = round(
-                    np.exp((tr_loss - logging_loss) / (global_step - tr_nb)), 4)
                 if global_step % args.logging_steps == 0:
-                    logger.info("  steps: %s  ppl: %s",
-                                global_step, round(avg_loss, 5))
+                    logger.info("  steps: %s  dis_l: %s  gen_l: %s",
+                                global_step, round((tr_loss_dis - logging_loss_dis) / args.logging_steps, 5),
+                                round((tr_loss_gen - logging_loss_gen) / args.logging_steps, 5))
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Log metrics
                     tb_writer.add_scalar(
                         'lr', scheduler.get_last_lr()[0], global_step)
                     tb_writer.add_scalar(
-                        'loss', (tr_loss - logging_loss) / args.logging_steps, global_step)
-                    logging_loss = tr_loss
-                    tr_nb = global_step
+                        'dis-loss', (tr_loss_dis - logging_loss_dis) / args.logging_steps, global_step)
+                    tb_writer.add_scalar(
+                        'gen-loss', (tr_loss_gen - logging_loss_gen) / args.logging_steps, global_step)
+                    logging_loss_gen = tr_loss_gen
+                    logging_loss_dis = tr_loss_dis
 
                 if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
                     checkpoint_prefix = "checkpoint"
                     # Save model checkpoint
                     if args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
                         results = valid_acc(
-                            args, model, tokenizer, eval_dataset=valid_dataset, eval_when_training=True)
+                            args, model, gen, dis, tokenizer, eval_dataset=valid_dataset, eval_when_training=True)
                         for key, value in results.items():
                             tb_writer.add_scalar(
                                 'eval_{}'.format(key), value, global_step)
@@ -219,6 +264,8 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
 
                     torch.save(args, os.path.join(
                         output_dir, "training_args.bin"))
+                    torch.save(dis.state_dict(), os.path.join(
+                        output_dir, "dis.bin"))
                     logger.info("Saving model checkpoint to %s", output_dir)
 
                     # _rotate_checkpoints(args, checkpoint_prefix)
@@ -252,11 +299,11 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 
-    return global_step, tr_loss / global_step
+    return global_step, (tr_loss_gen + tr_loss_dis) / global_step
 
 
 
-def valid_acc(args, model, tokenizer, eval_dataset, prefix="", eval_when_training=False):
+def valid_acc(args, model, gen, dis, tokenizer, eval_dataset, prefix="", eval_when_training=False):
     eval_output_dir = args.output_dir
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
@@ -273,12 +320,8 @@ def valid_acc(args, model, tokenizer, eval_dataset, prefix="", eval_when_trainin
     if args.n_gpu > 1 and eval_when_training is False:
         model = torch.nn.DataParallel(model)
 
-    # Eval!
-    #logger.info("***** Running evaluation {} *****".format(prefix))
-    #logger.info("  Num examples = %d", len(eval_dataset))
-    #logger.info("  Batch size = %d", args.eval_batch_size)
     model.eval()
-
+    dis.eval()
     predicts = []
     golds = []
     for batch in eval_dataloader:
@@ -289,8 +332,10 @@ def valid_acc(args, model, tokenizer, eval_dataset, prefix="", eval_when_trainin
         x_mask = x.ne(tokenizer.pad_token_id).to(x)
 
         with torch.no_grad():
-            output = model(x, None, x_mask)
-            predicts.extend(torch.argmax(output, dim=1).cpu().numpy())
+            rep = model.rep(x, x_mask)
+            logits, probs = dis(rep)
+            probs[:, -1] = -np.inf
+            predicts.extend(torch.argmax(probs, dim=1).cpu().numpy())
 
     print(classification_report(golds, predicts))
     acc = accuracy_score(golds, predicts)
@@ -441,7 +486,7 @@ def main():
 
     model = build_model(args)
     gen = Generator(128, 768, 768)
-    dis = Discriminator(768, 512, 2)
+    dis = Discriminator(768, 768, 2)
     args.vocab_size = len(tokenizer)
     model_parameters = model.parameters()
     num_params = sum([np.prod(p.size()) for p in model_parameters])
