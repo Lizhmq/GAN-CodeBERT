@@ -1,8 +1,8 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 DATADIR=./data/
-OUTPUTDIR=./save/ss3-1
+OUTPUTDIR=./save/ss1-2-1:3
 PRETRAINDIR=microsoft/codebert-base
-LOGFILE=ss3-1.log
+LOGFILE=ss1-2-1:3.log
 PER_NODE_GPU=1
 PER_GPU_BATCH_TRAIN=14
 PER_GPU_BATCH_EVAL=28
@@ -31,4 +31,4 @@ python  sstrain.py \
         --save_steps=600 \
         --overwrite_output_dir \
         --seed=2233 \
-        --train_name trainss3.pkl
+        --train_name trainss1-1:3.pkl

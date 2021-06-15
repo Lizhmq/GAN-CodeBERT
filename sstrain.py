@@ -166,24 +166,6 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
             tmplogits[:,-1] = -np.inf
             tmplogits[:,:-1] = D_real_logits[:,:-1]
             D_L_Supervised = celoss(tmplogits, y)
-            # pred_y = torch.argmax(D_real_logits, dim=1)
-            # correct_cnt = torch.sum(pred_y == y)
-            # total_cnt = y.shape[0] - torch.sum(y == 2)
-            # if total_cnt == 0:
-            #     acc = "-"
-            # else:
-            #     acc = str(correct_cnt / total_cnt)
-            # print(acc)
-            # log_probs = torch.nn.functional.log_softmax(D_real_logits, dim=-1)
-            # label2one_hot = torch.nn.functional.one_hot(y, log_probs.shape[-1])
-            # per_example_loss = -torch.sum(label2one_hot * log_probs, dim=-1)
-            # b_label_mask = y.ne(2)
-            # per_example_loss = torch.masked_select(per_example_loss, b_label_mask)
-            # labeled_example_count = per_example_loss.type(torch.float32).numel()
-            # if labeled_example_count == 0:
-            #     D_L_Supervised = 0
-            # else:
-            #     D_L_Supervised = torch.div(torch.sum(per_example_loss), labeled_example_count)
 
             D_L_unsupervised1U = -1 * torch.mean(torch.log(1 - D_real_probs[:, -1] + epsilon))
             D_L_unsupervised2U = -1 * torch.mean(torch.log(D_fake_probs[:, -1] + epsilon))
@@ -201,7 +183,7 @@ def train(args, train_dataset, valid_dataset, model, gen, dis, tokenizer, fh, po
                 loss = loss / args.gradient_accumulation_steps
                 gen_loss = gen_loss / args.gradient_accumulation_steps
             
-            # !!!!!!!!!!!!!!!
+            # !!!!!!!!!!!!!!! 10
             gen_loss = gen_loss / 10
 
             gen_loss.backward(retain_graph=True)
