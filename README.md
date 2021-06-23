@@ -16,7 +16,17 @@ Our result:
 
 For more details, please refer to our [report]().
 
-#### References
+### Scripts
+
+File "train.py" and "sstrain.py" are used for finetuning base CodeBERT classifier and semi-supervised GAN-CodeBERT model.
+
+To train models, just run "train.sh" or "sstrain.sh" directly.
+
+```sh
+sh train.sh
+```
+
+### References
 
 [1] Improved Techniques for Training GANs – NIPs16
 
