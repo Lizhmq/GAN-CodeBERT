@@ -14,7 +14,7 @@ Our result:
 
 <img src="pics/acc.png" style="zoom:60%;" />
 
-For more details, please refer to our [report]().
+For more details, please refer to our [report](report.pdf).
 
 ### Scripts
 
